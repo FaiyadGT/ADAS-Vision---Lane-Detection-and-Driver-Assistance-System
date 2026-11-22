@@ -11,23 +11,21 @@ import numpy as np
 def detect_lanes(frame: np.ndarray) -> np.ndarray:
     """Fit and draw left/right lane lines from edges and common lane colors."""
     height, width = frame.shape[:2]
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, 40, 130)
-
-    # Lane paint is often much easier to separate by color than by edges alone.
+    # Use lane-paint color masks. General Canny edges picked up the windshield,
+    # wipers, guardrails, and shadows in this particular dashcam clip.
     hls = cv2.cvtColor(frame, cv2.COLOR_BGR2HLS)
-    white = cv2.inRange(hls, np.array([0, 175, 0]), np.array([180, 255, 75]))
+    white = cv2.inRange(hls, np.array([0, 190, 0]), np.array([180, 255, 110]))
     yellow = cv2.inRange(hls, np.array([12, 70, 80]), np.array([40, 255, 255]))
-    lane_features = cv2.bitwise_or(edges, cv2.bitwise_or(white, yellow))
+    lane_features = cv2.bitwise_or(white, yellow)
 
-    # This clip has a large visible windshield reflection near the bottom.
-    detection_bottom = int(height * 0.80)
+    # Include changing road geometry, but stop above the windshield/dashboard.
+    detection_top = int(height * 0.45)
+    detection_bottom = int(height * 0.78)
     mask = np.zeros_like(lane_features)
     polygon = np.array(
         [[(0, detection_bottom),
-          (int(width * 0.38), int(height * 0.58)),
-          (int(width * 0.62), int(height * 0.58)),
+          (int(width * 0.25), detection_top),
+          (int(width * 0.75), detection_top),
           (width - 1, detection_bottom)]],
         dtype=np.int32,
     )
@@ -35,10 +33,10 @@ def detect_lanes(frame: np.ndarray) -> np.ndarray:
     roi_features = cv2.bitwise_and(lane_features, mask)
 
     segments = cv2.HoughLinesP(
-        roi_features, rho=1, theta=np.pi / 180, threshold=25,
-        minLineLength=max(25, width // 30), maxLineGap=max(30, width // 18),
+        roi_features, rho=1, theta=np.pi / 180, threshold=16,
+        minLineLength=max(20, width // 80), maxLineGap=max(40, width // 12),
     )
-    fitted = {"left": [], "right": []}
+    lane_segments = []
     if segments is not None:
         # OpenCV builds can return HoughLinesP as either (N, 1, 4) or (N, 4).
         for x1, y1, x2, y2 in np.asarray(segments).reshape(-1, 4):
@@ -48,32 +46,20 @@ def detect_lanes(frame: np.ndarray) -> np.ndarray:
             slope = (x2 - x1) / dy  # x as a function of y
             midpoint_x = (x1 + x2) / 2
             # Reject near-horizontal vehicle/road edges and very steep noise.
-            if not 0.10 <= abs(slope) <= 2.5:
+            if not 0.10 <= abs(slope) <= 4.5:
                 continue
-            if slope < 0 and midpoint_x < width * 0.65:
-                side = "left"
-            elif slope > 0 and midpoint_x > width * 0.35:
-                side = "right"
-            else:
+            is_left = slope < 0 and midpoint_x < width * 0.65
+            is_right = slope > 0 and midpoint_x > width * 0.35
+            if not (is_left or is_right):
                 continue
-            length = float(np.hypot(x2 - x1, dy))
-            intercept = x1 - slope * y1
-            fitted[side].append((slope, intercept, length))
+            lane_segments.append((int(x1), int(y1), int(x2), int(y2)))
 
     overlay = np.zeros_like(frame)
-    y_bottom, y_top = int(height * 0.90), int(height * 0.60)
-    for side, lines in fitted.items():
-        if not lines:
-            continue
-        weights = np.array([line[2] for line in lines])
-        slope = float(np.average([line[0] for line in lines], weights=weights))
-        intercept = float(np.average([line[1] for line in lines], weights=weights))
-        x_bottom = int(slope * y_bottom + intercept)
-        x_top = int(slope * y_top + intercept)
-        cv2.line(overlay, (x_bottom, y_bottom), (x_top, y_top), (0, 255, 0), 8)
+    # Mark only observed paint segments; don't extrapolate them across glass or road.
+    for x1, y1, x2, y2 in lane_segments:
+        cv2.line(overlay, (x1, y1), (x2, y2), (0, 255, 0), 6)
     return cv2.addWeighted(frame, 1.0, overlay, 0.9, 0)
 
-'This is not a real speedometer, just for demonstration purposes.'
 def draw_simulated_speed(frame: np.ndarray, speed_mph: int) -> np.ndarray:
     """Add a dashboard-style speed readout; this is not measured from the video."""
     output = frame.copy()
